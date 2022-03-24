@@ -154,9 +154,14 @@ Status Conv<T>::Compute(OpKernelContext* context) const {
 
 Status Conv<float>::Compute(OpKernelContext* context) const {
   size_t num_inputs = OpKernel::Node().InputDefs().size();
-  const auto* X = context->Input<Tensor>(0);
-  const auto* W = context->Input<Tensor>(1);
-  const Tensor* B = num_inputs == 3 ? context->Input<Tensor>(2) : nullptr;
+  const Tensor* X = context->Input<Tensor>(0);
+  const Tensor* W = context->Input<Tensor>(1);
+  const Tensor* B = num_inputs >= 3 ? context->Input<Tensor>(2) : nullptr;
+  const Tensor* Sum = nullptr;
+  return ComputeBase(context, X, W, B, Sum);
+}
+
+Status Conv<float>::ComputeBase(OpKernelContext* context, const Tensor* X, const Tensor* W, const Tensor* B, const Tensor* Sum) const {
   const int64_t N = X->Shape()[0];
   const int64_t C = X->Shape()[1];
   const int64_t M = W->Shape()[0];
@@ -195,7 +200,16 @@ Status Conv<float>::Compute(OpKernelContext* context) const {
   const auto* Xdata = X->template Data<float>();
   const auto* Bdata = B != nullptr ? B->template Data<float>() : nullptr;
   auto* Ydata = Y->template MutableData<float>();
-
+  // Check for the optional Conv/Sum fusion.
+  if (Sum != nullptr) {
+    const auto& sum_shape = Sum->Shape();
+    ORT_RETURN_IF_NOT(Y->Shape() == sum_shape, "output and sum shape must match");
+    // If the output was not allocated inplace with the sum tensor, then copy here.
+    const auto* sum_data = Sum->template Data<float>();
+    if (Ydata != sum_data) {
+      memcpy(Ydata, sum_data, sum_shape.Size() * sizeof(float));
+    }
+  }
   const size_t kernel_rank = kernel_shape.size();
   concurrency::ThreadPool* thread_pool = context->GetOperatorThreadPool();
 

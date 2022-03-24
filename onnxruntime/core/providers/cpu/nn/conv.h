@@ -29,6 +29,7 @@ class Conv<float> : public OpKernel {
   }
 
   Status Compute(OpKernelContext* context) const override;
+  Status ComputeBase(OpKernelContext* context, const Tensor* X, const Tensor* W, const Tensor* B, const Tensor* Sum) const;
 
  protected:
   MLAS_ACTIVATION activation_;
