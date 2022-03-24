@@ -12,6 +12,7 @@
 #include "core/optimizer/qdq_transformer/selectors_actions/qdq_selector_action_transformer.h"
 #include "core/optimizer/selectors_actions/selector_action_transformer_apply_contexts.h"
 #include "core/session/onnxruntime_session_options_config_keys.h"
+#include "core/optimizer/mobile_transformer.h"
 
 #if !defined(ORT_MINIMAL_BUILD)
 
@@ -257,12 +258,15 @@ InlinedVector<std::unique_ptr<GraphTransformer>> GenerateTransformers(
 
     case TransformerLevel::Level3: {
 #ifndef DISABLE_CONTRIB_OPS
+      const InlinedHashSet<std::string_view> cpu_ep = {onnxruntime::kCpuExecutionProvider};
       // Register the NCHWc layout transformer if supported by the platform.
       if (MlasNchwcGetBlockSize() > 1) {
         transformers.emplace_back(std::make_unique<NchwcTransformer>());
       }
       auto cpu_allocator = cpu_execution_provider.GetAllocator(0, OrtMemTypeDefault);
       transformers.emplace_back(std::make_unique<NhwcTransformer>(std::move(cpu_allocator)));
+      //we have to push this transformers behind NCHWCtransformer
+      transformers.emplace_back(std::make_unique<ConvAddActivationMobileFusion>(cpu_ep));
 #endif
     } break;
 

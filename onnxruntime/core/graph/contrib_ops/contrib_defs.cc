@@ -2329,7 +2329,8 @@ void RegisterContribSchemas() {
     RegisterNchwcSchemas();
   }
 #endif
-
+//actually, the 'mobile' schemal could also use for CPU in other platforms as long as NCHWC is not enabled .
+  RegisterMobileSchemas();
 #ifdef BUILD_MS_EXPERIMENTAL_OPS
   onnxruntime::signal::RegisterSignalSchemas();
 #endif

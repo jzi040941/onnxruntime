@@ -16,6 +16,7 @@ constexpr const char* kMSDomain = "com.microsoft";
 constexpr const char* kPytorchAtenDomain = "org.pytorch.aten";
 constexpr const char* kMSExperimentalDomain = "com.microsoft.experimental";
 constexpr const char* kMSNchwcDomain = "com.microsoft.nchwc";
+constexpr const char* kMSMobileDomain = "com.microsoft.mobile";
 constexpr const char* kMSInternalNHWCDomain = "com.ms.internal.nhwc";
 constexpr const char* kMSDmlDomain = "com.microsoft.dml";
 constexpr const char* kNGraphDomain = "com.intel.ai";
