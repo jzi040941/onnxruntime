@@ -2329,6 +2329,7 @@ void RegisterContribSchemas() {
     RegisterNchwcSchemas();
   }
 #endif
+
 #ifdef BUILD_MS_EXPERIMENTAL_OPS
   onnxruntime::signal::RegisterSignalSchemas();
 #endif
