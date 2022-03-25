@@ -4,7 +4,7 @@
 #include <deque>
 #include "core/graph/graph_utils.h"
 #include "core/optimizer/initializer.h"
-#include "core/optimizer/mobile_transformer.h"
+#include "core/optimizer/conv_add_act_fusion.h"
 #include "core/mlas/inc/mlas.h"
 #include "core/graph/node_attr_utils.h"
 #include "core/optimizer/utils.h"
@@ -31,20 +31,20 @@ class ConvAddActivation : public NodeSelector {
     if (node_ep != kCpuExecutionProvider) {
       return std::nullopt;
     }
-    //we can't assign `node` as the pre-conv-node, even it is, because the node in this branch may not satisfy requirements
+    // we can't assign `conv_node` as the producer-node, even it is, because we have to make sure
+    // 1. Its type is 'conv', 2. it has to satisfy the other requirements,like shape, please refer to SelectConvProducer for more info
     const Node* conv_node = nullptr;
     const auto* add_node = GetLoneConsumerNode(graph_viewer, node);
     if (!add_node) {
       return std::nullopt;
     }
-    // The following transforms only run when the input edge count has already
-    // been decremented to zero by earlier transforms.
-    // any element-wise op could be fused here.
-    if (graph_utils::IsSupportedOptypeVersionAndDomain(*add_node, "Add", {7, 13, 14}) ||
-        graph_utils::IsSupportedOptypeVersionAndDomain(*add_node, "Sum", {6, 8, 13})) {
-      conv_node = MultiSelectBinary(*add_node, true);
-    } else if (graph_utils::IsSupportedOptypeVersionAndDomain(*add_node, "Mul", {7, 13, 14})) {
-      conv_node = MultiSelectBinary(*add_node, false);
+    // Let's support addition first, leave any-element-wise-op fusion in the future.
+    // what we want to here is that:
+    // 1 find the Add node, 2 find it's producer node and make sure it's a conv node
+    // 3 find the next node and check if it's a activation node, if yes, we will fuse conv+add+activation or conv+add
+    // 
+    if (graph_utils::IsSupportedOptypeVersionAndDomain(*add_node, "Add", {7, 13, 14})){
+      conv_node = SelectConvProducer(*add_node);
     }
     if (!conv_node) {
       return std::nullopt;
@@ -53,18 +53,20 @@ class ConvAddActivation : public NodeSelector {
     //even the next node is not a activation node, it's also fine.
     if (!act_node) {
     } else if (graph_utils::IsSupportedOptypeVersionAndDomain(*act_node, "Relu", {6, 13, 14}) ||
-                     graph_utils::IsSupportedOptypeVersionAndDomain(*act_node, "Sigmoid", {6, 13}) ||
-                     graph_utils::IsSupportedOptypeVersionAndDomain(*act_node, "Tanh", {6, 13}) ||
-                     graph_utils::IsSupportedOptypeVersionAndDomain(*act_node, "LeakyRelu", {6})) {
+               graph_utils::IsSupportedOptypeVersionAndDomain(*act_node, "Sigmoid", {6, 13}) ||
+               graph_utils::IsSupportedOptypeVersionAndDomain(*act_node, "Tanh", {6, 13}) ||
+               graph_utils::IsSupportedOptypeVersionAndDomain(*act_node, "LeakyRelu", {6})) {
+      // this branch is deliberately empty as we want to keep 'act_node' as remains.
     } else if (graph_utils::IsSupportedOptypeVersionAndDomain(*act_node, "Clip", {6, 11, 12, 13})) {
       float min, max;
       if (!optimizer_utils::GetClipConstantMinMax(graph_viewer.GetGraph(), *act_node, min, max)) {
+        //if node is invalid, then we don't want to fuse it together.
         act_node = nullptr;
-      }  
+      }
+      // if it's a valid Clip node, then we just keep the 'act_node' value.
     } else {
       act_node = nullptr;
     }
-
 
     NodesToOptimizeIndicesBuilder builder{};
     builder.target_node = conv_node->Index();
@@ -75,18 +77,13 @@ class ConvAddActivation : public NodeSelector {
     return builder.Build();
   }
 
-  const Node* MultiSelectBinary(const Node& node, bool add_node) const {
-    InlinedVector<Node*> inputs_node;
-    if (!add_node) {
-      // FIX ME, not sure if it deserve to implement multiplication-relu fusion
-      return nullptr;
-    }
-    constexpr int32_t kTensorDims = 4;
+  const Node* SelectConvProducer(const Node& node) const {
+    InlinedVector<const Node*> inputs_node;
+    constexpr int32_t kTensorDims = 4; //NCHW
     const auto& input_defs = node.InputDefs();
 
-
     for (auto producer_node_ptr = node.InputNodesBegin(); producer_node_ptr != node.InputNodesEnd(); ++producer_node_ptr) {
-      Node* producer_node = const_cast<Node*>(&(*producer_node_ptr));
+      const Node* producer_node = dynamic_cast<const Node*>(&(*producer_node_ptr));
       inputs_node.push_back(producer_node);
     }
     if (inputs_node.size() == 0) {
@@ -98,56 +95,62 @@ class ConvAddActivation : public NodeSelector {
     bool all_shapes_match = true;
     auto* input_0_shape = input_defs[0]->Shape();
     for (size_t n = 1; n < input_defs_count; n++) {
-      for (int i = 0; i < kTensorDims; i++) {
-        // Check if ONNX shape inferencing has computed a precise dimension value.
-        auto* input_n_shape = input_defs[n]->Shape();
-        if ((input_0_shape == nullptr) || (input_n_shape == nullptr)) {
+      // Check if ONNX shape inferencing has computed a precise dimension value.
+      if (input_0_shape->dim_size() != kTensorDims) {
           all_shapes_match = false;
-        } else {
-          auto& input_0_dim = input_0_shape->dim(i);
-          auto& input_n_dim = input_n_shape->dim(i);
-          if (!utils::HasDimValue(input_0_dim) ||
-              !utils::HasDimValue(input_n_dim) ||
-              (input_0_dim.dim_value() <= 0) ||
-              (input_0_dim.dim_value() != input_n_dim.dim_value())) {
-            if (!utils::HasDimParam(input_0_dim) ||
-                !utils::HasDimParam(input_n_dim) ||
-                (input_0_dim.dim_param() != input_n_dim.dim_param())) {
-              all_shapes_match = false;
-              break;
-            }
+          break;
+      }
+      auto* input_n_shape = input_defs[n]->Shape();
+      if ((input_0_shape == nullptr) || (input_n_shape == nullptr)) {
+        all_shapes_match = false;
+        break;
+      }
+      if (!all_shapes_match) {
+        break;
+      }
+      for (int i = 0; i < kTensorDims; i++) {
+        auto& input_0_dim = input_0_shape->dim(i);
+        auto& input_n_dim = input_n_shape->dim(i);
+        if (!utils::HasDimValue(input_0_dim) ||
+            !utils::HasDimValue(input_n_dim) ||
+            (input_0_dim.dim_value() == 0) || //even though zero-dim is valid, but we don't support here
+            (input_0_dim.dim_value() != input_n_dim.dim_value())) {
+          if (!utils::HasDimParam(input_0_dim) ||
+              !utils::HasDimParam(input_n_dim) ||
+              (input_0_dim.dim_param() != input_n_dim.dim_param())) {
+            all_shapes_match = false;
+            break;
           }
         }
       }
     }
-    if (all_shapes_match) {
-      // If one of the inputs to the Add/Sum node is a convolution, then
-      // attempt to fuse the addition into the convolution itself.
-      if (add_node && input_defs_count == 2) {
-        for (size_t n = 0; n < 2; n++) {
-          auto& producer_input_defs = inputs_node[n]->MutableInputDefs();
-          auto& producer_input_args_count = inputs_node[n]->MutableInputArgsCount();
-          size_t pre_input_defs_count = producer_input_defs.size();
-          // Check if this is a single use convolution that hasn't already
-          // been fused with another Add/Sum node. The Add/Sum can also only be
-          // fused if the convolution isn't itself fused with an activation.
-          if ((inputs_node[n]->OpType() == "Conv") &&
-              (pre_input_defs_count < 4) && (producer_input_args_count.size() < 4) &&
-              (graph_utils::GetNodeAttribute(*inputs_node[n], "activation") == nullptr)) {
-            if (pre_input_defs_count < 3) {
-              // The optional bias parameter is empty so set to an empty string.
-              //TODO, add a new null arguments for bias
-              continue;
-            }
-            return inputs_node[n];
-          }
+    //we can't fuse them if shape is not matched, it will happens when broadcast-Add
+    if (!all_shapes_match || input_defs_count != 2) {
+      return nullptr;
+    }
+    // If one of the inputs to the Add node is a convolution, then
+    // attempt to fuse the addition into the convolution itself.
+    for (size_t n = 0; n < input_defs_count; n++) {
+      const auto& producer_input_defs = inputs_node[n]->InputDefs();
+      const auto& producer_input_args_count = inputs_node[n]->InputArgCount();
+      size_t pre_input_defs_count = producer_input_defs.size();
+      // Check if this is a single use convolution that hasn't already
+      // been fused with another Add/Sum node. The Add/Sum can also only be
+      // fused if the convolution isn't itself fused with an activation.
+      if ((inputs_node[n]->OpType() == "Conv") &&
+          (pre_input_defs_count < 4) && (producer_input_args_count.size() < 4) &&
+          (graph_utils::GetNodeAttribute(*inputs_node[n], "activation") == nullptr)) {
+        if (pre_input_defs_count < 3) {
+          // The optional bias parameter is empty so set to an empty string.
+          // TODO, add a new null arguments for bias
+          continue;
         }
+        return inputs_node[n];
       }
+    }
 
-    }
     return nullptr;
   }
-
 };
 
 }  // namespace selectors
@@ -159,7 +162,7 @@ class FuseConvAddActivation : public ReplaceWithNew {
  private:
   std::string OpType(const RuntimeState&) const override { return "FusedConv"; }
 
-  std::string Domain(const RuntimeState&) const override { return kMSMobileDomain; }
+  std::string Domain(const RuntimeState&) const override { return kMSDomain; }
 
   NodeAttributes ExtraAttributes(const RuntimeState& state) const override {
     NodeAttributes extra_fused_conv_attributes;

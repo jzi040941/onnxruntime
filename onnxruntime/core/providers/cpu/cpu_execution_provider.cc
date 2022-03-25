@@ -8,7 +8,6 @@
 
 #ifndef DISABLE_CONTRIB_OPS
 #include "contrib_ops/cpu/cpu_contrib_kernels.h"
-#include "contrib_ops/cpu/mobile_contrib_kernels.h"
 #endif
 
 #if defined(ENABLE_TRAINING) || defined(ENABLE_TRAINING_OPS)
@@ -2114,7 +2113,6 @@ Status RegisterCPUKernels(KernelRegistry& kernel_registry) {
 #endif
 #ifndef DISABLE_CONTRIB_OPS
   ORT_RETURN_IF_ERROR(::onnxruntime::contrib::RegisterCpuContribKernels(kernel_registry));
-  ORT_RETURN_IF_ERROR(::onnxruntime::contrib::RegisterMobileContribKernels(kernel_registry));
 #endif
 #if defined(ENABLE_TRAINING) || defined(ENABLE_TRAINING_OPS)
   ORT_RETURN_IF_ERROR(::onnxruntime::contrib::RegisterCpuTrainingKernels(kernel_registry));

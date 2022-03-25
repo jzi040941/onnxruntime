@@ -28,7 +28,6 @@ def map_ort_constant_to_domain(ort_constant_name: str):
                               'kMSDomain': 'com.microsoft',
                               'kMSExperimentalDomain': 'com.microsoft.experimental',
                               'kMSNchwcDomain': 'com.microsoft.nchwc',
-                              'kMSMobileDomain': 'com.microsoft.mobile',
                               'kMSDmlDomain': 'com.microsoft.dml',
                               'kNGraphDomain': 'com.intel.ai',
                               'kVitisAIDomain': 'com.xilinx'}
