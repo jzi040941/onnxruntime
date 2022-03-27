@@ -61,8 +61,7 @@ Status GRUBase::ComputeImpl(OpKernelContext& context,
   AllocatorPtr alloc;
   status = context.GetTempSpaceAllocator(&alloc);
   ORT_RETURN_IF_ERROR(status);
-  gsl::span<const T> input_weights = W.DataAsSpan<T>();
-  gsl::span<const T> recurrent_weights = R.DataAsSpan<T>();
+
   gsl::span<const T> bias = B != nullptr ? B->DataAsSpan<T>() : gsl::span<const T>();
 
   // spans for first direction
@@ -70,8 +69,6 @@ Status GRUBase::ComputeImpl(OpKernelContext& context,
   const size_t recurrent_weights_size_per_direction = 3 * hidden_size_ * hidden_size_;
   const size_t bias_size_per_direction = 6 * hidden_size_;
 
-  gsl::span<const T> input_weights_1 = input_weights.subspan(0, input_weights_size_per_direction);
-  gsl::span<const T> recurrent_weights_1 = recurrent_weights.subspan(0, recurrent_weights_size_per_direction);
   gsl::span<const T> bias_1 = bias.empty() ? bias : bias.subspan(0, bias_size_per_direction);
 
   gsl::span<const T> input = X.DataAsSpan<T>();
@@ -106,10 +103,6 @@ Status GRUBase::ComputeImpl(OpKernelContext& context,
 
   if (direction_ == Direction::kBidirectional) {
     // spans for second direction
-    gsl::span<const T> input_weights_2 = input_weights.subspan(input_weights_size_per_direction,
-                                                               input_weights_size_per_direction);
-    gsl::span<const T> recurrent_weights_2 = recurrent_weights.subspan(recurrent_weights_size_per_direction,
-                                                                       recurrent_weights_size_per_direction);
     gsl::span<const T> bias_2 = bias.empty() ? bias : bias.subspan(bias_size_per_direction, bias_size_per_direction);
 
     gsl::span<const T> initial_hidden_2 = initial_hidden.empty()
@@ -128,7 +121,7 @@ Status GRUBase::ComputeImpl(OpKernelContext& context,
                                     activation_funcs_.Entries()[0],
                                     activation_funcs_.Entries()[1],
                                     clip_, thread_pool);
-    fw.Compute(input, sequence_lens_span, num_directions_, input_weights_1, recurrent_weights_1,
+    fw.Compute(input, sequence_lens_span, num_directions_, W_1, R_1,
                output_1, hidden_output_1);
 
     detail::UniDirectionalGru<T> bw(alloc, seq_length, batch_size, input_size, hidden_size_,
@@ -136,7 +129,7 @@ Status GRUBase::ComputeImpl(OpKernelContext& context,
                                     activation_funcs_.Entries()[2],
                                     activation_funcs_.Entries()[3],
                                     clip_, thread_pool);
-    bw.Compute(input, sequence_lens_span, num_directions_, input_weights_2, recurrent_weights_2,
+    bw.Compute(input, sequence_lens_span, num_directions_, W_2, R_2,
                output_2, hidden_output_2);
   } else {
     detail::UniDirectionalGru<T> gru_p(alloc, seq_length, batch_size, input_size, hidden_size_,
