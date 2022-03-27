@@ -56,10 +56,13 @@ class GRUBase {
   }
 
   ~GRUBase() = default;
-  template <typename T>
-  Status ComputeImpl(OpKernelContext& context) const;
-  //need to fix computeImpl & add validateInput
-  
+  template <typename T, typename WeightT>
+  Status ComputeImpl(OpKernelContext& context,
+                    const rnn::detail::GemmWeights<WeightT>& W_1,
+                    const rnn::detail::GemmWeights<WeightT>& W_2,
+                    const rnn::detail::GemmWeights<WeightT>& R_1,
+                    const rnn::detail::GemmWeights<WeightT>& R_2) const;
+
   rnn::detail::Direction direction_;
   int num_directions_;
 
