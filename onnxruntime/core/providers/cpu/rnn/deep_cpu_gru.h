@@ -18,10 +18,27 @@ class DeepCpuGruOp final : public OpKernel, public GRUBase {
  public:
   DeepCpuGruOp(const OpKernelInfo& info) : OpKernel(info), GRUBase(info) {} 
 
+  Status PrePack(const Tensor& tensor, int input_idx, AllocatorPtr alloc,
+                 /*out*/ bool& is_packed,
+                 /*out*/ PrePackedWeights* prepacked_weights) override;
+
+  Status UseSharedPrePackedBuffers(std::vector<BufferUniquePtr>& prepacked_buffers,
+                                   int input_idx,
+                                   /*out*/ bool& used_shared_buffers) override;
+
   Status Compute(OpKernelContext* context) const override;
 
+  ~DeepCpuGruOp() override = default;
+
+private:
+  Status TryPackWeights(const Tensor& weights, rnn::detail::PackedWeights& packed_weights,
+                        bool& is_packed, AllocatorPtr& alloc);
+                        
   template <typename T>
   Status ComputeImpl(OpKernelContext& context) const;
+
+  rnn::detail::PackedWeights packed_W_;
+  rnn::detail::PackedWeights packed_R_;
 };
 
 }  // namespace onnxruntime

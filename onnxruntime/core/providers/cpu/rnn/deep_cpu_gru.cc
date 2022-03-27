@@ -169,21 +169,140 @@ using namespace rnn::detail;
 #define DumpMatrix(...) ((void)0)
 #endif
 
+Status DeepCpuGruOp::TryPackWeights(const Tensor& weights, PackedWeights& packed_weights, bool& is_packed, AllocatorPtr& alloc) {
+  const auto& shape = weights.Shape();
+  if (shape.NumDimensions() != 3) {
+    return Status::OK();
+  }
+
+  // weights: [num_directions, 3*hidden_size, input_size]
+  // recurrence weights: [num_directions, 3*hidden_size, hidden_size]
+  const size_t N = static_cast<size_t>(shape[1]);
+  const size_t K = static_cast<size_t>(shape[2]);
+
+  if ((shape[0] != num_directions_) || (N != static_cast<size_t>(hidden_size_) * 3)) {
+    return Status::OK();
+  }
+
+  const size_t packed_weights_size = MlasGemmPackBSize(N, K);
+  if (packed_weights_size == 0) {
+    return Status::OK();
+  }
+
+  size_t packed_weights_data_size = SafeInt<size_t>(packed_weights_size) * num_directions_;
+  auto* packed_weights_data = alloc->Alloc(packed_weights_data_size);
+
+  // Initialize memory to 0 as there could be some padding associated with pre-packed
+  // buffer memory and we don not want it uninitialized and generate different hashes
+  // if and when we try to cache this pre-packed buffer for sharing between sessions.
+  memset(packed_weights_data, 0, packed_weights_data_size);
+
+  packed_weights.buffer_ = BufferUniquePtr(packed_weights_data, BufferDeleter(alloc));
+  packed_weights.buffer_size_ = packed_weights_data_size;
+  packed_weights.weights_size_ = packed_weights_size;
+  packed_weights.shape_ = shape;
+
+  const auto* weights_data = weights.Data<float>();
+  for (int i = 0; i < num_directions_; i++) {
+    MlasGemmPackB(CblasTrans, N, K, weights_data, K, packed_weights_data);
+    packed_weights_data = static_cast<uint8_t*>(packed_weights_data) + packed_weights_size;
+    weights_data += N * K;
+  }
+
+  is_packed = true;
+  return Status::OK();
+}
+
+static void UseSharedPrePackedBuffersImpl(std::vector<BufferUniquePtr>& prepacked_buffers,
+                                          rnn::detail::PackedWeights& packed_tensor) {
+  packed_tensor.buffer_ = std::move(prepacked_buffers[0]);
+}
+
+Status DeepCpuGruOp::PrePack(const Tensor& tensor, int input_idx,
+                              AllocatorPtr alloc, /*out*/ bool& is_packed,
+                              /*out*/ PrePackedWeights* prepacked_weights) {
+  is_packed = false;
+
+  if (tensor.IsDataType<float>()) {
+    if (input_idx == 1) {
+      ORT_RETURN_IF_ERROR(TryPackWeights(tensor, packed_W_, is_packed, alloc));
+
+      bool share_prepacked_weights = (prepacked_weights != nullptr);
+      if (is_packed && share_prepacked_weights) {
+        prepacked_weights->buffers_.push_back(std::move(packed_W_.buffer_));
+        prepacked_weights->buffer_sizes_.push_back(packed_W_.buffer_size_);
+      }
+    } else if (input_idx == 2) {
+      ORT_RETURN_IF_ERROR(TryPackWeights(tensor, packed_R_, is_packed, alloc));
+
+      bool share_prepacked_weights = (prepacked_weights != nullptr);
+      if (is_packed && share_prepacked_weights) {
+        prepacked_weights->buffers_.push_back(std::move(packed_R_.buffer_));
+        prepacked_weights->buffer_sizes_.push_back(packed_R_.buffer_size_);
+      }
+    }
+  }
+
+  return Status::OK();
+}
+
+Status DeepCpuGruOp::UseSharedPrePackedBuffers(std::vector<BufferUniquePtr>& prepacked_buffers,
+                                                int input_idx,
+                                                /*out*/ bool& used_shared_buffers) {
+  used_shared_buffers = false;
+
+  if (input_idx == 1) {
+    used_shared_buffers = true;
+    UseSharedPrePackedBuffersImpl(prepacked_buffers, packed_W_);
+  } else if (input_idx == 2) {
+    used_shared_buffers = true;
+    UseSharedPrePackedBuffersImpl(prepacked_buffers, packed_R_);
+  }
+
+  return Status::OK();
+}
+
 Status DeepCpuGruOp::Compute(OpKernelContext* context) const {
   const Tensor& X = *context->Input<Tensor>(0);  // inputs. [seq_length, batch_size, input_size]
 
   Status status;
 
-  if (X.IsDataType<float>())
+  if (X.IsDataType<float>()) {
     status = ComputeImpl<float>(*context);
+    const Tensor* W = context->Input<Tensor>(1);
+    // weights. [num_directions, 3*hidden_size, input_size]
+    const Tensor* R = context->Input<Tensor>(2);
+    // recurrence weights. [num_directions, 3*hidden_size, hidden_size]
+
+    const auto& W_shape = W->Shape()
+    const auto& R_shape = R->Shape()
+
+    const auto* input_weights = (W != nullptr) ? W->Data<float>() : nullptr;
+    const auto* recurrent_weights = (R != nullptr) ? R->Data<float>() : nullptr;
+
+    // spans for first direction
+    const size_t input_weights_size_per_direction = W_shape[1] * W_shape[2];
+    const size_t hidden_weights_size_per_direction = R_shape[1] * R_shape[2];
+
+    GemmWeights<float> W_1(0, input_weights, input_weights_size_per_direction, packed_W_);
+    GemmWeights<float> R_1(0, recurrent_weights, hidden_weights_size_per_direction, packed_R_);
+
+    GemmWeights<float> W_2;
+    GemmWeights<float> R_2;
+    if (direction_ == Direction::kBidirectional) {
+      W_2.Init(1, input_weights, input_weights_size_per_direction, packed_W_, nullptr);
+      R_2.Init(1, recurrent_weights, hidden_weights_size_per_direction, packed_R_, nullptr);
+    }
+
+    return GRUBase::ComputeImpl<float, float>(*context, W_1, W_2, R_1, R_2);
+  }
   else if (X.IsDataType<double>()) {
     /* Need to update all the helpers to support double...
     status = ComputeImpl<double>(*context); */
     ORT_NOT_IMPLEMENTED("GRU operator does not support double yet");
-  } else
+  } else {
     ORT_THROW("Invalid data type for GRU operator of ", X.DataType());
-
-  return status;
+  }
 }
 
 }  // namespace onnxruntime
