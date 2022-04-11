@@ -103,12 +103,12 @@ template <typename WeightT>
 void UniDirectionalLstm<T>::AllocateQuantizeBuffers(int max_sequence_length) {
   // Can not specialize on WeightT without specify T explicitly, so use sizeof
   if constexpr(sizeof(WeightT) == 1) {
-    const int hidden_size_x4 = 4 * hidden_size_;
+    const int hidden_size_x3 = 3 * hidden_size_;
     const int total_rows = max_sequence_length * batch_size_;
 
     int input_or_a_size = std::max(total_rows * input_size_, batch_size_ * hidden_size_);
     quantized_input_or_a_ = Allocate(allocator_, input_or_a_size, quantized_input_or_a_ptr_, false);
-    quantized_C_buffer_ = Allocate(allocator_, batch_size_ * hidden_size_x4, quantized_C_buffer_ptr_, false);
+    quantized_C_buffer_ = Allocate(allocator_, batch_size_ * hidden_size_x3, quantized_C_buffer_ptr_, false);
   }
 }
 
