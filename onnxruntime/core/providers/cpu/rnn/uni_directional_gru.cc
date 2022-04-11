@@ -15,7 +15,7 @@ namespace gru {
 #define DumpMatrix(...) ((void)0)
 #endif
 
-using namespace rnn:detail;
+using namespace rnn::detail;
 
 
 template <typename T>
@@ -99,11 +99,26 @@ UniDirectionalGru<T>::UniDirectionalGru(AllocatorPtr allocator,
 }
 
 template <typename T>
+template <typename WeightT>
+void UniDirectionalLstm<T>::AllocateQuantizeBuffers(int max_sequence_length) {
+  // Can not specialize on WeightT without specify T explicitly, so use sizeof
+  if constexpr(sizeof(WeightT) == 1) {
+    const int hidden_size_x4 = 4 * hidden_size_;
+    const int total_rows = max_sequence_length * batch_size_;
+
+    int input_or_a_size = std::max(total_rows * input_size_, batch_size_ * hidden_size_);
+    quantized_input_or_a_ = Allocate(allocator_, input_or_a_size, quantized_input_or_a_ptr_, false);
+    quantized_C_buffer_ = Allocate(allocator_, batch_size_ * hidden_size_x4, quantized_C_buffer_ptr_, false);
+  }
+}
+
+template <typename T>
+template <typename WeightT>
 void UniDirectionalGru<T>::Compute(const gsl::span<const T>& inputs_arg,
                                    const gsl::span<const int>& sequence_lengths_arg,
                                    const int num_directions,
-                                   const gsl::span<const T>& input_weights,
-                                   const gsl::span<const T>& recurrent_weights,
+                                   const GemmWeights<WeightT>& input_weights,
+                                   const GemmWeights<WeightT>& recurrent_weights,
                                    gsl::span<T>& outputs,
                                    gsl::span<T>& final_hidden_state) {
   using span_T_const_iter = typename gsl::span<T>::const_iterator;
@@ -120,11 +135,11 @@ void UniDirectionalGru<T>::Compute(const gsl::span<const T>& inputs_arg,
   }
 
   DumpMatrix("Inputs", inputs.data(), seq_length_ * batch_size_, input_size_);
-  DumpMatrix("input_weights", input_weights.data(), 3 * hidden_size_, input_size_);
-  DumpMatrix("recurrent_weights", recurrent_weights.data(), 3 * hidden_size_, hidden_size_);
+  //DumpMatrix("input_weights", input_weights.data(), 3 * hidden_size_, input_size_);
+  //DumpMatrix("recurrent_weights", recurrent_weights.data(), 3 * hidden_size_, hidden_size_);
 
-  gsl::span<const T> recurrent_weightsZR = recurrent_weights.subspan(0, 2 * hidden_size_ * hidden_size_);
-  gsl::span<const T> recurrent_weightsH = recurrent_weights.subspan(2 * hidden_size_ * hidden_size_, hidden_size_ * hidden_size_);
+  gsl::span<const WeightT> recurrent_weightsZR = recurrent_weights.subspan(0, 2 * hidden_size_ * hidden_size_);
+  gsl::span<const WeightT> recurrent_weightsH = recurrent_weights.subspan(2 * hidden_size_ * hidden_size_, hidden_size_ * hidden_size_);
 
   gsl::span<T> original_outputs = outputs;
   const bool output_sequence = !outputs.empty();
@@ -154,11 +169,12 @@ void UniDirectionalGru<T>::Compute(const gsl::span<const T>& inputs_arg,
   // apply weights to all the inputs
   ComputeGemm(total_rows, hidden_size_x3, input_size_, alpha,
               inputs.cbegin(), inputs.cend(),
-              input_size_,
-              input_weights.cbegin(), input_weights.cend(),
-              input_size_, 0.f,
+              input_weights, 0.f,
               outputZRH_.begin(), outputZRH_.end(),
-              hidden_size_x3, ttp_);
+              hidden_size_x3, 
+              quantized_input_or_a_.begin(), 
+              nullptr,
+              ttp_);
 
   DumpMatrix("inputs with weights applied", outputZRH_.data(), seq_length_ * batch_size_ * 3, hidden_size_);
 
@@ -472,6 +488,24 @@ void UniDirectionalGru<T>::AllocateBuffers() {
     outputs_reverse_ = Allocate(allocator_, batch_times_seq_length * hidden_size_, outputs_reverse_ptr_);
   }
 }
+
+template class UniDirectionalGru<float>;
+template void UniDirectionalGru<float>::Compute<float>(const gsl::span<const float>& inputs_arg,
+                                   const gsl::span<const int>& sequence_lengths_arg,
+                                   const int num_directions,
+                                   const GemmWeights<float>& input_weights,
+                                   const GemmWeights<float>& recurrent_weights,
+                                   gsl::span<float>& outputs,
+                                   gsl::span<float>& final_hidden_state);
+
+template void UniDirectionalGru<float>::Compute<uint8_t>(const gsl::span<const float>& inputs_arg,
+                                   const gsl::span<const int>& sequence_lengths_arg,
+                                   const int num_directions,
+                                   const GemmWeights<uint8_t>& input_weights,
+                                   const GemmWeights<uint8_t>& recurrent_weights,
+                                   gsl::span<float>& outputs,
+                                   gsl::span<float>& final_hidden_state);
+
 
 }  // namespace gru 
 }  // namespace onnxruntime

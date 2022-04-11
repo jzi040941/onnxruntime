@@ -9,7 +9,7 @@
 namespace onnxruntime {
 namespace gru {
 
-using namespace rnn:detail;
+using namespace rnn::detail;
 
 template <typename T>
 class UniDirectionalGru {
@@ -19,9 +19,10 @@ class UniDirectionalGru {
                     const gsl::span<const T>& initial_hidden_state, const ActivationFuncs::Entry& activation_func_f,
                     const ActivationFuncs::Entry& activation_func_g, float clip,
                     onnxruntime::concurrency::ThreadPool* ttp);
-
+                    
+  template <typename WeightT>
   void Compute(const gsl::span<const T>& inputs, const gsl::span<const int>& sequence_lengths, int num_directions,
-               const gsl::span<const T>& input_weights, const gsl::span<const T>& recurrent_weights,
+               const GemmWeights<WeightT>& input_weights, const GemmWeights<WeightT>& recurrent_weights,
                gsl::span<T>& outputs, gsl::span<T>& final_hidden_state);
 
   ~UniDirectionalGru() = default;
@@ -86,6 +87,17 @@ class UniDirectionalGru {
   void AllocateBuffers();
 
   onnxruntime::concurrency::ThreadPool* ttp_;
+
+  // Quantized operation related allocation members
+  template <typename WeightT>
+  void AllocateQuantizeBuffers(int max_sequence_length);
+
+  // Buffer shared for quantized input whole, and quantized a each sequence step
+  IAllocatorUniquePtr<uint8_t> quantized_input_or_a_ptr_;
+  gsl::span<uint8_t> quantized_input_or_a_;
+
+  IAllocatorUniquePtr<int32_t> quantized_C_buffer_ptr_;
+  gsl::span<int32_t> quantized_C_buffer_;
 };
 
 }  // namespace gru
