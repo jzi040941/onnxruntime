@@ -213,6 +213,69 @@ Status DeepCpuGruOp::TryPackWeights(const Tensor& weights, PackedWeights& packed
   return Status::OK();
 }
 
+Status DeepCpuGruOp::TryPackRecurrentWeights(const Tensor& weights, PackedWeights& packed_weights_zr,  PackedWeights& packed_weights_h, bool& is_packed, AllocatorPtr& alloc) {
+  const auto& shape = weights.Shape();
+  if (shape.NumDimensions() != 3) {
+    return Status::OK();
+  }
+
+
+  // weights: [num_directions, 3*hidden_size, input_size]
+  // recurrence weights: [num_directions, 3*hidden_size, hidden_size]
+  const size_t N = static_cast<size_t>(shape[1]);
+  const size_t K = static_cast<size_t>(shape[2]);
+
+  if ((shape[0] != num_directions_) || (N != static_cast<size_t>(hidden_size_) * 3)) {
+    return Status::OK();
+  }
+
+  auto shape_zr = weights.Shape();
+  auto shape_h = weights.Shape();
+  const size_t N_ZR = static_cast<size_t>(hidden_size_*2);
+  const size_t N_H = static_cast<size_t>(hidden_size_);
+  shape_zr[1] = N_ZR;
+  shape_h[1] = N_H;
+
+  const size_t packed_weights_zr_size = MlasGemmPackBSize(N_ZR, K);
+  const size_t packed_weights_h_size = MlasGemmPackBSize(N_H, K);
+  if (packed_weights_zr_size == 0 || packed_weights_h_size == 0) {
+    return Status::OK();
+  }
+
+  size_t packed_weights_zr_data_size = SafeInt<size_t>(packed_weights_zr_size) * num_directions_;
+  auto* packed_weights_zr_data = alloc->Alloc(packed_weights_zr_data_size);
+  size_t packed_weights_h_data_size = SafeInt<size_t>(packed_weights_h_size) * num_directions_;
+  auto* packed_weights_h_data = alloc->Alloc(packed_weights_h_data_size);
+
+  // Initialize memory to 0 as there could be some padding associated with pre-packed
+  // buffer memory and we don not want it uninitialized and generate different hashes
+  // if and when we try to cache this pre-packed buffer for sharing between sessions.
+  memset(packed_weights_zr_data, 0, packed_weights_zr_data_size);
+  packed_weights_zr.buffer_ = BufferUniquePtr(packed_weights_zr_data, BufferDeleter(alloc));
+  packed_weights_zr.buffer_size_ = packed_weights_zr_data_size;
+  packed_weights_zr.weights_size_ = packed_weights_zr_size;
+  packed_weights_zr.shape_ = shape_zr;
+
+  memset(packed_weights_h_data, 0, packed_weights_h_data_size);
+  packed_weights_h.buffer_ = BufferUniquePtr(packed_weights_h_data, BufferDeleter(alloc));
+  packed_weights_h.buffer_size_ = packed_weights_h_data_size;
+  packed_weights_h.weights_size_ = packed_weights_h_size;
+  packed_weights_h.shape_ = shape_h;
+
+  const auto* weights_data = weights.Data<float>();
+  for (int i = 0; i < num_directions_; i++) {
+    MlasGemmPackB(CblasTrans, N_ZR, K, weights_data, K, packed_weights_zr_data);
+    packed_weights_zr_data = static_cast<uint8_t*>(packed_weights_zr_data) + packed_weights_zr_size;
+    weights_data += N_ZR * K;
+    MlasGemmPackB(CblasTrans, N_h, K, weights_data, K, packed_weights_h_data);
+    packed_weights_h_data = static_cast<uint8_t*>(packed_weights_h_data) + packed_weights_h_size;
+    weights_data += N_H * K;
+  }
+
+  is_packed = true;
+  return Status::OK();
+}
+
 static void UseSharedPrePackedBuffersImpl(std::vector<BufferUniquePtr>& prepacked_buffers,
                                           rnn::detail::PackedWeights& packed_tensor) {
   packed_tensor.buffer_ = std::move(prepacked_buffers[0]);
@@ -234,6 +297,7 @@ Status DeepCpuGruOp::PrePack(const Tensor& tensor, int input_idx,
       }
     } else if (input_idx == 2) {
       ORT_RETURN_IF_ERROR(TryPackWeights(tensor, packed_R_, is_packed, alloc));
+      //ORT_RETURN_IF_ERROR(TryPackRecurrentWeights(tensor, packed_R_ZR_, pakced_R_H_, is_packed, alloc));
 
       bool share_prepacked_weights = (prepacked_weights != nullptr);
       if (is_packed && share_prepacked_weights) {
@@ -274,16 +338,19 @@ Status DeepCpuGruOp::Compute(OpKernelContext* context) const {
     const Tensor* R = context->Input<Tensor>(2);
     // recurrence weights. [num_directions, 3*hidden_size, hidden_size]
 
-    const auto& W_shape = W->Shape()
-    const auto& R_shape = R->Shape()
+    const auto& W_shape = W->Shape();
+    const auto& R_shape = R->Shape();
+
 
     const auto* input_weights = (W != nullptr) ? W->Data<float>() : nullptr;
     const auto* recurrent_weights = (R != nullptr) ? R->Data<float>() : nullptr;
+    
 
     // spans for first direction
+    const size_t hidden_size_ = R_shape[2];
     const size_t input_weights_size_per_direction = W_shape[1] * W_shape[2];
-    const size_t hidden_weights_size_per_direction = R_shape[1] * R_shape[2];
-
+    const size_t hidden_weights_size_per_direction = 3 * hidden_size_ * hidden_size_;
+   
     GemmWeights<float> W_1(0, input_weights, input_weights_size_per_direction, packed_W_);
     GemmWeights<float> R_1(0, recurrent_weights, hidden_weights_size_per_direction, packed_R_);
 

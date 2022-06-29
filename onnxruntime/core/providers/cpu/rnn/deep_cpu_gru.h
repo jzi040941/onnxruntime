@@ -33,12 +33,14 @@ class DeepCpuGruOp final : public OpKernel, public GRUBase {
 private:
   Status TryPackWeights(const Tensor& weights, rnn::detail::PackedWeights& packed_weights,
                         bool& is_packed, AllocatorPtr& alloc);
-                        
+
   template <typename T>
   Status ComputeImpl(OpKernelContext& context) const;
 
   rnn::detail::PackedWeights packed_W_;
-  rnn::detail::PackedWeights packed_R_;
+  //rnn::detail::PackedWeights packed_R_;
+  rnn::detail::PackedWeights packed_R_ZR_;
+  rnn::detail::PackedWeights packed_R_H_;
 };
 
 }  // namespace onnxruntime
